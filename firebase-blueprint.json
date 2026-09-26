@@ -1,0 +1,119 @@
+{
+  "entities": {
+    "Issue": {
+      "title": "Civic Issue",
+      "description": "Public infrastructure issue or civic hazard report",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "category": { "type": "string", "enum": ["pothole", "garbage", "streetlight", "waterleak", "traffic", "other"] },
+        "status": { "type": "string", "enum": ["reported", "verified", "in_progress", "resolved"] },
+        "priorityLevel": { "type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"] },
+        "priorityScore": { "type": "number" },
+        "latitude": { "type": "number" },
+        "longitude": { "type": "number" },
+        "address": { "type": "string", "maxLength": 300 },
+        "photoUrl": { "type": "string" },
+        "upvotes": { "type": "number" },
+        "reportedBy": { "type": "string" },
+        "reporterName": { "type": "string", "maxLength": 100 },
+        "reporterEmail": { "type": "string", "format": "email" },
+        "reporterPhotoUrl": { "type": "string" },
+        "isGoogleVerified": { "type": "boolean" },
+        "ward": { "type": "string", "maxLength": 100 },
+        "municipality": { "type": "string", "maxLength": 100 },
+        "timeline": { "type": "array" },
+        "proposals": { "type": "array" },
+        "appointedCompanyId": { "type": "string" },
+        "appointedCompanyName": { "type": "string", "maxLength": 150 },
+        "appointedDeadline": { "type": "string" },
+        "renovationStatus": { "type": "string" }
+      },
+      "required": ["title", "category", "status", "latitude", "longitude", "reportedBy"]
+    },
+    "Proposal": {
+      "title": "Renovation Proposal",
+      "description": "Company proposal for civic incident renovation work",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "issueId": { "type": "string" },
+        "companyId": { "type": "string" },
+        "companyName": { "type": "string", "maxLength": 150 },
+        "contactEmail": { "type": "string", "format": "email" },
+        "contactPhone": { "type": "string" },
+        "estimatedDays": { "type": "number" },
+        "estimatedCost": { "type": "string" },
+        "scopeOfWork": { "type": "string", "maxLength": 2000 },
+        "submittedAt": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "rejected"] },
+        "appointedDeadline": { "type": "string" },
+        "reviewedBy": { "type": "string" }
+      },
+      "required": ["companyId", "companyName", "scopeOfWork", "status"]
+    },
+    "Vote": {
+      "title": "Citizen Vote",
+      "description": "Corroboration vote on a reported issue",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "votedAt": { "type": "string" }
+      },
+      "required": ["userId"]
+    },
+    "Activity": {
+      "title": "Public Activity",
+      "description": "Audit and activity trail of civic events",
+      "type": "object",
+      "properties": {
+        "issueId": { "type": "string" },
+        "type": { "type": "string" },
+        "detail": { "type": "string" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["type", "detail"]
+    },
+    "User": {
+      "title": "User Profile",
+      "description": "Verified resident or municipal authority account",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "citizen", "company"] },
+        "isAdmin": { "type": "boolean" },
+        "isCompany": { "type": "boolean" },
+        "companyName": { "type": "string" },
+        "isGoogleVerified": { "type": "boolean" },
+        "isEmailVerified": { "type": "boolean" }
+      },
+      "required": ["uid"]
+    }
+  },
+  "firestore": {
+    "/issues/{issueId}": {
+      "schema": "Issue",
+      "description": "Collection of all public municipal issues"
+    },
+    "/issues/{issueId}/votes/{voteId}": {
+      "schema": "Vote",
+      "description": "Per-user votes on civic issues"
+    },
+    "/issues/{issueId}/proposals/{proposalId}": {
+      "schema": "Proposal",
+      "description": "Renovation proposals submitted by contractor companies"
+    },
+    "/activities/{activityId}": {
+      "schema": "Activity",
+      "description": "Real-time activity audit feed"
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles for verified citizens and municipal staff"
+    }
+  }
+}

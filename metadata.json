@@ -1,0 +1,10 @@
+{
+  "name": "CivicPulse - Live Civic Issue Map",
+  "description": "Real-time interactive civic infrastructure issue monitoring map powered by Firebase Firestore, supporting live reports, photo uploads, upvoting, density analysis, and status timelines.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
