@@ -2,7 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { CivicIssue, IssueStatus, RenovationProposal } from '../../types/issue';
 import { getCategoryMeta, getPriorityBadgeColor, getStatusMeta } from '../../utils/priority';
 import { formatDate, formatPreciseTimestamp } from '../../utils/formatDate';
-import { upvoteIssue, updateIssueStatus, hasUserVoted, appointCompanyProposal } from '../../firebase/firestore';
+import {
+  upvoteIssue,
+  updateIssueStatus,
+  hasUserVoted,
+  appointCompanyProposal,
+  markIssueAsNotSpam,
+  markIssueAsSpam,
+} from '../../firebase/firestore';
 import { useAuth } from '../../context/AuthContext';
 import {
   X,
@@ -230,6 +237,45 @@ export const IssueDetailsModal: React.FC<IssueDetailsModalProps> = ({
               <div className="absolute bottom-2 right-2 px-2 py-1 bg-black/60 backdrop-blur-md rounded text-[10px] text-slate-300 font-medium">
                 Tap to inspect
               </div>
+            </div>
+          )}
+
+          {/* AI Spam Shield Moderation Banner if flagged as spam */}
+          {issue.isSpam && (
+            <div className="p-4 bg-rose-950/60 border border-rose-500/50 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-rose-200 shadow-lg shadow-rose-950/30">
+              <div className="flex items-start gap-3">
+                <ShieldAlert className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-white text-sm">AI Spam Shield Flagged</span>
+                    {issue.spamConfidence && (
+                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-900/80 text-rose-300 border border-rose-500/40">
+                        {Math.round(issue.spamConfidence * 100)}% Confidence
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-rose-200 mt-1">
+                    "{issue.spamReason || 'Text does not make sense (incoherent keyboard mashing / gibberish)'}"
+                  </p>
+                </div>
+              </div>
+
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const officer = user?.displayName || user?.email || 'Municipal Authority';
+                    await markIssueAsNotSpam(issue.id, officer);
+                    onToast?.('Report Restored (Not Spam)', 'Incident restored to public community feed and live map.');
+                    onIssueUpdated?.();
+                    onClose();
+                  }}
+                  className="px-3.5 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-xl text-xs font-bold shadow-md flex items-center gap-1.5 shrink-0 self-start sm:self-auto cursor-pointer"
+                >
+                  <CheckCircle2 className="w-4 h-4 text-white" />
+                  <span>Report as Not Spam (Restore)</span>
+                </button>
+              )}
             </div>
           )}
 

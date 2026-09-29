@@ -28,7 +28,13 @@
         "appointedCompanyId": { "type": "string" },
         "appointedCompanyName": { "type": "string", "maxLength": 150 },
         "appointedDeadline": { "type": "string" },
-        "renovationStatus": { "type": "string" }
+        "renovationStatus": { "type": "string" },
+        "isSpam": { "type": "boolean" },
+        "spamReason": { "type": "string" },
+        "spamConfidence": { "type": "number" },
+        "spamFilteredAt": { "type": "string" },
+        "markedNotSpamBy": { "type": "string" },
+        "markedNotSpamAt": { "type": "string" }
       },
       "required": ["title", "category", "status", "latitude", "longitude", "reportedBy"]
     },

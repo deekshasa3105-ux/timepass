@@ -6,6 +6,7 @@ import { uploadIssuePhoto } from '../../firebase/storage';
 import { createIssue } from '../../firebase/firestore';
 import { useAuth } from '../../context/AuthContext';
 import { SignInModal } from '../Auth/SignInModal';
+import { evaluateReportSpam } from '../../services/spamFilterService';
 import {
   X,
   Upload,
@@ -186,6 +187,14 @@ export const ReportIssueModal: React.FC<ReportIssueModalProps> = ({
         }
       }
 
+      // Automated AI Spam & Incoherent Text Evaluation
+      const spamCheck = await evaluateReportSpam({
+        title: title.trim(),
+        description: description.trim(),
+        category,
+        address: addr,
+      });
+
       const issueId = await createIssue({
         title: title.trim(),
         description: description.trim(),
@@ -200,16 +209,21 @@ export const ReportIssueModal: React.FC<ReportIssueModalProps> = ({
         reporterPhotoUrl: user?.photoURL ? user.photoURL : undefined,
         reporterEmail: user?.email ? user.email : undefined,
         isGoogleVerified: Boolean(isGoogleUser),
+        isSpam: spamCheck.isSpam,
+        spamReason: spamCheck.isSpam ? spamCheck.reason : undefined,
+        spamConfidence: spamCheck.isSpam ? spamCheck.confidence : undefined,
       });
 
-      try {
-        confetti({
-          particleCount: 45,
-          spread: 55,
-          origin: { y: 0.7 },
-        });
-      } catch (confettiErr) {
-        console.warn('Confetti error:', confettiErr);
+      if (!spamCheck.isSpam) {
+        try {
+          confetti({
+            particleCount: 45,
+            spread: 55,
+            origin: { y: 0.7 },
+          });
+        } catch (confettiErr) {
+          console.warn('Confetti error:', confettiErr);
+        }
       }
 
       // Reset form state

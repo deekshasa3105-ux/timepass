@@ -16,6 +16,9 @@ interface DemoIssueSeed {
   photoUrl: string;
   upvotes: number;
   reporterName: string;
+  isSpam?: boolean;
+  spamReason?: string;
+  spamConfidence?: number;
 }
 
 const DEMO_ISSUES: DemoIssueSeed[] = [
@@ -116,6 +119,40 @@ const DEMO_ISSUES: DemoIssueSeed[] = [
     photoUrl: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=800&auto=format&fit=crop&q=80',
     upvotes: 64,
     reporterName: 'Commuter Network',
+  },
+  {
+    title: 'asdfghjk lskdfj qwerpoiu123',
+    description: 'zzzzz 11111 test asdfasdf mnbvcxz nothing here whatever lol',
+    category: 'other',
+    status: 'reported',
+    latitude: 12.9550,
+    longitude: 77.6100,
+    address: 'Near Old Airport Rd, Domlur, Bengaluru',
+    ward: 'Ward / 112 Domlur',
+    municipality: 'Bruhat Bengaluru Mahanagara Palike',
+    photoUrl: '',
+    upvotes: 0,
+    reporterName: 'Anonymous Reporter',
+    isSpam: true,
+    spamReason: 'AI Shield: Text does not make any sense (incoherent keyboard mashing / gibberish non-words)',
+    spamConfidence: 0.98,
+  },
+  {
+    title: 'FREE CRYPTO BONUS VISIT WWW.WIN-COIN-FAST.XYZ EARN $5000',
+    description: 'Join telegram channel @cryptorich now for instant payout guaranteed promo casino!',
+    category: 'other',
+    status: 'reported',
+    latitude: 12.9250,
+    longitude: 77.5850,
+    address: 'Jayanagar 4th Block, Bengaluru',
+    ward: 'Ward / 153 Jayanagar',
+    municipality: 'Bruhat Bengaluru Mahanagara Palike',
+    photoUrl: '',
+    upvotes: 0,
+    reporterName: 'Promo Bot #491',
+    isSpam: true,
+    spamReason: 'AI Shield: Commercial advertisement / unsolicited scam promotion',
+    spamConfidence: 0.99,
   }
 ];
 
@@ -154,6 +191,12 @@ export async function seedDemoIssuesToFirestore(): Promise<{ inserted: number; m
         priorityScore: score,
         ward: demo.ward,
         municipality: demo.municipality,
+        isSpam: Boolean(demo.isSpam),
+        ...(demo.isSpam ? {
+          spamReason: demo.spamReason || 'Flagged by AI automated spam filter',
+          spamConfidence: demo.spamConfidence || 0.95,
+          spamFilteredAt: new Date().toISOString(),
+        } : {}),
         timeline: [
           {
             status: 'reported',

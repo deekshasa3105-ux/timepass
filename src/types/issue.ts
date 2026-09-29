@@ -65,6 +65,12 @@ export interface CivicIssue {
   appointedCompanyName?: string;
   appointedDeadline?: string;
   renovationStatus?: 'open_for_bids' | 'contractor_appointed' | 'work_in_progress' | 'completed';
+  isSpam?: boolean;
+  spamReason?: string;
+  spamConfidence?: number;
+  spamFilteredAt?: any;
+  markedNotSpamBy?: string;
+  markedNotSpamAt?: any;
 }
 
 export interface ActivityItem {

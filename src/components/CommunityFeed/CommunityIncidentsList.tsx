@@ -3,27 +3,37 @@ import { CivicIssue, IssueCategory, IssueStatus } from '../../types/issue';
 import { useAuth } from '../../context/AuthContext';
 import { getCategoryMeta, getPriorityBadgeColor, getStatusMeta } from '../../utils/priority';
 import { formatDate } from '../../utils/formatDate';
-import { upvoteIssue, hasUserVoted, getLocalReportIds, updateIssueStatus } from '../../firebase/firestore';
+import {
+  upvoteIssue,
+  getLocalReportIds,
+  updateIssueStatus,
+  markIssueAsNotSpam,
+  markIssueAsSpam,
+  deleteSpamIssue,
+} from '../../firebase/firestore';
+import { batchEvaluateSpam } from '../../services/spamFilterService';
 import {
   Search,
-  Filter,
   MapPin,
   ThumbsUp,
   Clock,
-  Building,
   CheckCircle2,
-  ExternalLink,
   Flame,
   User as UserIcon,
   Users,
-  Sparkles,
   Camera,
-  Layers,
   ArrowRight,
-  ShieldCheck,
   Building2,
   HardHat,
   Briefcase,
+  ShieldAlert,
+  ShieldCheck,
+  Trash2,
+  Sparkles,
+  RefreshCw,
+  AlertTriangle,
+  RotateCcw,
+  Bot,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { RenovationProposalModal } from '../IssueDetails/RenovationProposalModal';
@@ -33,7 +43,7 @@ interface CommunityIncidentsListProps {
   onSelectIssueOnMap: (issue: CivicIssue) => void;
   onOpenIssueDetails: (issue: CivicIssue) => void;
   onOpenReportModal: () => void;
-  activeTab?: 'all' | 'others' | 'mine';
+  activeTab?: 'all' | 'others' | 'mine' | 'spam';
 }
 
 export const CommunityIncidentsList: React.FC<CommunityIncidentsListProps> = ({
@@ -44,13 +54,20 @@ export const CommunityIncidentsList: React.FC<CommunityIncidentsListProps> = ({
   activeTab = 'all',
 }) => {
   const { user, isAdmin, isCompany, companyName } = useAuth();
-  const [tab, setTab] = useState<'all' | 'others' | 'mine' | 'top_upvoted' | 'appointed_to_me' | 'my_bids'>(activeTab);
+  const [tab, setTab] = useState<'all' | 'others' | 'mine' | 'top_upvoted' | 'appointed_to_me' | 'my_bids' | 'spam'>(
+    isAdmin && activeTab === 'spam' ? 'spam' : activeTab === 'spam' ? 'all' : activeTab
+  );
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
   const [votedMap, setVotedMap] = useState<Record<string, boolean>>({});
   const [votingMap, setVotingMap] = useState<Record<string, boolean>>({});
   const [proposalModalIssue, setProposalModalIssue] = useState<CivicIssue | null>(null);
+
+  // Spam moderation action states
+  const [processingSpamId, setProcessingSpamId] = useState<string | null>(null);
+  const [isScanningSpam, setIsScanningSpam] = useState(false);
+  const [bannerNotice, setBannerNotice] = useState<{ title: string; subtitle?: string; type: 'success' | 'info' | 'warn' } | null>(null);
 
   const currentUserId = user?.uid;
 
@@ -75,110 +92,162 @@ export const CommunityIncidentsList: React.FC<CommunityIncidentsListProps> = ({
     { key: 'resolved', label: 'Resolved' },
   ];
 
-  // Company appointed issues
+  // Separate non-spam and spam issues
+  const nonSpamIssues = useMemo(() => issues.filter((i) => !i.isSpam), [issues]);
+  const spamIssues = useMemo(() => issues.filter((i) => Boolean(i.isSpam)), [issues]);
+
+  // Company appointed issues (strictly non-spam)
   const myAppointedIssues = useMemo(() => {
     if (!isCompany) return [];
-    return issues.filter((i) => {
+    return nonSpamIssues.filter((i) => {
       const matchId = i.appointedCompanyId && currentUserId && i.appointedCompanyId === currentUserId;
       const matchName = companyName && i.appointedCompanyName && i.appointedCompanyName.toLowerCase() === companyName.toLowerCase();
       return matchId || matchName;
     });
-  }, [issues, isCompany, currentUserId, companyName]);
+  }, [nonSpamIssues, isCompany, currentUserId, companyName]);
 
-  // Company bid issues
+  // Company bid issues (strictly non-spam)
   const myBidIssues = useMemo(() => {
     if (!isCompany) return [];
-    return issues.filter((i) => {
+    return nonSpamIssues.filter((i) => {
       return i.proposals?.some((p) => {
         const matchId = currentUserId && p.companyId === currentUserId;
         const matchName = companyName && p.companyName.toLowerCase() === companyName.toLowerCase();
         return matchId || matchName;
       });
     });
-  }, [issues, isCompany, currentUserId, companyName]);
+  }, [nonSpamIssues, isCompany, currentUserId, companyName]);
 
-  // Counts for tabs
+  // Counts for tabs (strictly non-spam for citizen tabs)
   const reportsByOthers = useMemo(() => {
     const localIds = getLocalReportIds();
-    return issues.filter((i) => {
-      const isMine = (currentUserId && i.reportedBy === currentUserId) ||
+    return nonSpamIssues.filter((i) => {
+      const isMine =
+        (currentUserId && i.reportedBy === currentUserId) ||
         (Boolean(user?.email) && i.reporterEmail === user?.email) ||
         localIds.includes(i.id);
       return !isMine;
     });
-  }, [issues, currentUserId, user?.email]);
+  }, [nonSpamIssues, currentUserId, user?.email]);
 
   const reportsByMe = useMemo(() => {
     const localIds = getLocalReportIds();
-    return issues.filter((i) => {
-      return (currentUserId && i.reportedBy === currentUserId) ||
+    return nonSpamIssues.filter((i) => {
+      return (
+        (currentUserId && i.reportedBy === currentUserId) ||
         (Boolean(user?.email) && i.reporterEmail === user?.email) ||
-        localIds.includes(i.id);
+        localIds.includes(i.id)
+      );
     });
-  }, [issues, currentUserId, user?.email]);
+  }, [nonSpamIssues, currentUserId, user?.email]);
 
-  // Filtered issues
+  // If a non-admin is somehow on 'spam', reset to 'all'
+  const activeTabSafe = tab === 'spam' && !isAdmin ? 'all' : tab;
+
+  // Filtered issues based on current tab
   const filteredIssues = useMemo(() => {
     const localIds = getLocalReportIds();
-    return issues.filter((issue) => {
-      // Tab filter
-      const isMine = (currentUserId && issue.reportedBy === currentUserId) ||
-        (Boolean(user?.email) && issue.reporterEmail === user?.email) ||
-        localIds.includes(issue.id);
 
-      if (tab === 'others' && isMine) {
-        return false;
-      }
-      if (tab === 'mine') {
-        if (!isMine) return false;
-      }
-      if (tab === 'appointed_to_me') {
-        const isAppointed = (currentUserId && issue.appointedCompanyId === currentUserId) ||
-          (companyName && issue.appointedCompanyName?.toLowerCase() === companyName.toLowerCase());
-        if (!isAppointed) return false;
-      }
-      if (tab === 'my_bids') {
-        const hasBid = issue.proposals?.some((p) => {
-          return (currentUserId && p.companyId === currentUserId) ||
-            (companyName && p.companyName.toLowerCase() === companyName.toLowerCase());
-        });
-        if (!hasBid) return false;
-      }
+    // Source pool depends on tab
+    const sourcePool = activeTabSafe === 'spam' ? spamIssues : nonSpamIssues;
 
-      // Category filter
-      if (selectedCategory !== 'all' && issue.category !== selectedCategory) {
-        return false;
-      }
+    return sourcePool
+      .filter((issue) => {
+        // Tab-specific filters
+        if (activeTabSafe === 'others') {
+          const isMine =
+            (currentUserId && issue.reportedBy === currentUserId) ||
+            (Boolean(user?.email) && issue.reporterEmail === user?.email) ||
+            localIds.includes(issue.id);
+          if (isMine) return false;
+        }
 
-      // Status filter
-      if (selectedStatus !== 'all' && issue.status !== selectedStatus) {
-        return false;
-      }
+        if (activeTabSafe === 'mine') {
+          const isMine =
+            (currentUserId && issue.reportedBy === currentUserId) ||
+            (Boolean(user?.email) && issue.reporterEmail === user?.email) ||
+            localIds.includes(issue.id);
+          if (!isMine) return false;
+        }
 
-      // Search filter
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        const titleMatch = issue.title.toLowerCase().includes(q);
-        const descMatch = issue.description?.toLowerCase().includes(q);
-        const addrMatch = issue.address?.toLowerCase().includes(q);
-        const reporterMatch = issue.reporterName?.toLowerCase().includes(q);
-        const wardMatch = issue.ward?.toLowerCase().includes(q);
-        const companyMatch = issue.appointedCompanyName?.toLowerCase().includes(q);
-        if (!titleMatch && !descMatch && !addrMatch && !reporterMatch && !wardMatch && !companyMatch) {
+        if (activeTabSafe === 'appointed_to_me') {
+          const isAppointed =
+            (currentUserId && issue.appointedCompanyId === currentUserId) ||
+            (companyName && issue.appointedCompanyName?.toLowerCase() === companyName.toLowerCase());
+          if (!isAppointed) return false;
+        }
+
+        if (activeTabSafe === 'my_bids') {
+          const hasBid = issue.proposals?.some((p) => {
+            return (
+              (currentUserId && p.companyId === currentUserId) ||
+              (companyName && p.companyName.toLowerCase() === companyName.toLowerCase())
+            );
+          });
+          if (!hasBid) return false;
+        }
+
+        // Category filter
+        if (selectedCategory !== 'all' && issue.category !== selectedCategory) {
           return false;
         }
-      }
 
-      return true;
-    }).sort((a, b) => {
-      if (tab === 'top_upvoted') {
-        return (b.upvotes || 0) - (a.upvotes || 0);
-      }
-      const timeA = a.createdAt?.getTime ? a.createdAt.getTime() : new Date(a.createdAt).getTime();
-      const timeB = b.createdAt?.getTime ? b.createdAt.getTime() : new Date(b.createdAt).getTime();
-      return timeB - timeA;
-    });
-  }, [issues, tab, selectedCategory, selectedStatus, searchQuery, currentUserId, companyName]);
+        // Status filter
+        if (selectedStatus !== 'all' && issue.status !== selectedStatus) {
+          return false;
+        }
+
+        // Search filter
+        if (searchQuery.trim()) {
+          const q = searchQuery.toLowerCase();
+          const titleMatch = issue.title.toLowerCase().includes(q);
+          const descMatch = issue.description?.toLowerCase().includes(q);
+          const addrMatch = issue.address?.toLowerCase().includes(q);
+          const reporterMatch = issue.reporterName?.toLowerCase().includes(q);
+          const wardMatch = issue.ward?.toLowerCase().includes(q);
+          const companyMatch = issue.appointedCompanyName?.toLowerCase().includes(q);
+          const spamReasonMatch = issue.spamReason?.toLowerCase().includes(q);
+          if (
+            !titleMatch &&
+            !descMatch &&
+            !addrMatch &&
+            !reporterMatch &&
+            !wardMatch &&
+            !companyMatch &&
+            !spamReasonMatch
+          ) {
+            return false;
+          }
+        }
+
+        return true;
+      })
+      .sort((a, b) => {
+        if (activeTabSafe === 'top_upvoted') {
+          return (b.upvotes || 0) - (a.upvotes || 0);
+        }
+        const timeA = a.createdAt?.getTime ? a.createdAt.getTime() : new Date(a.createdAt).getTime();
+        const timeB = b.createdAt?.getTime ? b.createdAt.getTime() : new Date(b.createdAt).getTime();
+        return timeB - timeA;
+      });
+  }, [
+    activeTabSafe,
+    nonSpamIssues,
+    spamIssues,
+    selectedCategory,
+    selectedStatus,
+    searchQuery,
+    currentUserId,
+    companyName,
+    user?.email,
+  ]);
+
+  const showBanner = (title: string, subtitle?: string, type: 'success' | 'info' | 'warn' = 'info') => {
+    setBannerNotice({ title, subtitle, type });
+    setTimeout(() => {
+      setBannerNotice(null);
+    }, 5500);
+  };
 
   // Handle upvoting
   const handleUpvote = async (issueId: string, e: React.MouseEvent) => {
@@ -205,33 +274,224 @@ export const CommunityIncidentsList: React.FC<CommunityIncidentsListProps> = ({
     }
   };
 
+  // Municipal Authority: Report an incident as NOT SPAM (Restores to public feed)
+  const handleReportNotSpam = async (issue: CivicIssue, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!isAdmin) return;
+
+    setProcessingSpamId(issue.id);
+    try {
+      const municipalOfficer = user?.displayName || user?.email || 'Municipal Authority';
+      await markIssueAsNotSpam(issue.id, municipalOfficer);
+      try {
+        confetti({
+          particleCount: 40,
+          spread: 50,
+          origin: { y: 0.7 },
+        });
+      } catch {}
+      showBanner(
+        'Report Verified & Restored (Not Spam)',
+        `"${issue.title}" has been unflagged from spam and is now visible on the public community map.`,
+        'success'
+      );
+    } catch (err: any) {
+      console.error('Error reporting as not spam:', err);
+      showBanner('Action Failed', err?.message || 'Could not unflag incident', 'warn');
+    } finally {
+      setProcessingSpamId(null);
+    }
+  };
+
+  // Municipal Authority: Manually flag an issue as spam
+  const handleManualMarkSpam = async (issue: CivicIssue, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!isAdmin) return;
+
+    setProcessingSpamId(issue.id);
+    try {
+      const municipalOfficer = user?.displayName || user?.email || 'Municipal Authority';
+      await markIssueAsSpam(issue.id, 'Manually flagged as spam / nonsensical by Municipal Authority', municipalOfficer);
+      showBanner(
+        'Moved to Municipal Spam Section',
+        `"${issue.title}" has been moved to the spam section and hidden from public citizens.`,
+        'info'
+      );
+    } catch (err: any) {
+      console.error('Error flagging as spam:', err);
+      showBanner('Action Failed', err?.message || 'Could not flag as spam', 'warn');
+    } finally {
+      setProcessingSpamId(null);
+    }
+  };
+
+  // Municipal Authority: Permanently purge spam issue document
+  const handleDeleteSpamReport = async (issue: CivicIssue, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!isAdmin) return;
+
+    if (!window.confirm(`Permanently delete this spam incident record: "${issue.title}"?`)) {
+      return;
+    }
+
+    setProcessingSpamId(issue.id);
+    try {
+      await deleteSpamIssue(issue.id);
+      showBanner('Spam Record Deleted', 'The junk incident report was permanently removed.', 'info');
+    } catch (err: any) {
+      console.error('Error deleting spam:', err);
+      showBanner('Delete Failed', err?.message || 'Could not delete document', 'warn');
+    } finally {
+      setProcessingSpamId(null);
+    }
+  };
+
+  // Municipal Authority: Run automated batch AI scan across all active reports
+  const handleRunBatchAIScan = async () => {
+    if (!isAdmin || isScanningSpam) return;
+
+    setIsScanningSpam(true);
+    showBanner('AI Spam Shield Scanning...', 'Analyzing all incident texts for incoherent text, keyboard mash, and spam.', 'info');
+
+    try {
+      const results = await batchEvaluateSpam(
+        nonSpamIssues.map((iss) => ({
+          id: iss.id,
+          title: iss.title,
+          description: iss.description,
+          category: iss.category,
+          address: iss.address,
+        }))
+      );
+
+      let newlyFlaggedCount = 0;
+      for (const res of results) {
+        if (res.isSpam) {
+          await markIssueAsSpam(res.id, res.reason, 'Automated AI Filtration Shield');
+          newlyFlaggedCount++;
+        }
+      }
+
+      if (newlyFlaggedCount > 0) {
+        showBanner(
+          `AI Spam Scan Complete: ${newlyFlaggedCount} Spam Reports Flagged`,
+          `${newlyFlaggedCount} incoherent reports were cleared out and moved to the Municipal Spam Section.`,
+          'warn'
+        );
+      } else {
+        showBanner(
+          'AI Spam Scan Complete: 0 Spam Reports Found',
+          'All checked community reports contain coherent civic text.',
+          'success'
+        );
+      }
+    } catch (err: any) {
+      console.error('Batch scan error:', err);
+      showBanner('Scan Interrupted', err?.message || 'Error occurred during AI scan', 'warn');
+    } finally {
+      setIsScanningSpam(false);
+    }
+  };
+
   return (
     <div className="flex-1 h-full flex flex-col bg-slate-950 overflow-hidden select-none">
+      {/* Banner Notifications */}
+      {bannerNotice && (
+        <div
+          className={`px-4 py-2.5 text-xs font-semibold flex items-center justify-between gap-3 border-b animate-fadeIn shrink-0 ${
+            bannerNotice.type === 'success'
+              ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/40'
+              : bannerNotice.type === 'warn'
+              ? 'bg-amber-950/90 text-amber-200 border-amber-500/40'
+              : 'bg-indigo-950/90 text-indigo-200 border-indigo-500/40'
+          }`}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            {bannerNotice.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            ) : bannerNotice.type === 'warn' ? (
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+            ) : (
+              <Sparkles className="w-4 h-4 text-indigo-400 shrink-0" />
+            )}
+            <div className="min-w-0">
+              <span className="font-bold mr-1.5">{bannerNotice.title}:</span>
+              <span className="text-slate-300 truncate">{bannerNotice.subtitle}</span>
+            </div>
+          </div>
+          <button
+            onClick={() => setBannerNotice(null)}
+            className="text-slate-400 hover:text-white px-2 py-0.5 rounded text-xs shrink-0"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Top Filter and Search Bar */}
       <div className="border-b border-slate-800 bg-slate-900/70 backdrop-blur-md px-4 sm:px-6 py-4 space-y-3 shrink-0">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
-              <Users className="w-5 h-5 text-indigo-400" />
+              {activeTabSafe === 'spam' ? (
+                <ShieldAlert className="w-5 h-5 text-rose-400 animate-pulse" />
+              ) : (
+                <Users className="w-5 h-5 text-indigo-400" />
+              )}
               <h2 className="text-base sm:text-lg font-bold text-white tracking-tight">
-                Community Incidents & Grievances Directory
+                {activeTabSafe === 'spam'
+                  ? 'Municipal Spam Moderation Section (AI Filtered)'
+                  : 'Community Incidents & Grievances Directory'}
               </h2>
-              <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
+              <span
+                className={`px-2.5 py-0.5 rounded-full text-xs font-bold border ${
+                  activeTabSafe === 'spam'
+                    ? 'bg-rose-500/10 text-rose-300 border-rose-500/30'
+                    : 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20'
+                }`}
+              >
                 {filteredIssues.length} {filteredIssues.length === 1 ? 'Report' : 'Reports'}
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              Browse, corroborate, and track public municipal issues reported by citizens across all city wards
+              {activeTabSafe === 'spam'
+                ? 'Review AI-flagged spam reports whose text did not make sense. Strictly restricted to verified municipal authorities.'
+                : 'Browse, corroborate, and track public municipal issues reported by citizens across all city wards.'}
             </p>
           </div>
 
-          {/* Quick Report Button */}
-          <button
-            onClick={onOpenReportModal}
-            className="self-start md:self-auto px-4 py-2 bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 text-white rounded-xl text-xs font-bold shadow-lg shadow-indigo-600/30 flex items-center gap-1.5 transition-all hover:scale-[1.02] active:scale-[0.98]"
-          >
-            <span>+ Report An Incident</span>
-          </button>
+          {/* Action Buttons: Report + Municipal Spam Shortcut */}
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Dedicated Municipal Spam Section Button (Strictly Municipal only) */}
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={() => setTab(activeTabSafe === 'spam' ? 'all' : 'spam')}
+                className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all shadow-md cursor-pointer ${
+                  activeTabSafe === 'spam'
+                    ? 'bg-rose-600 hover:bg-rose-500 text-white border border-rose-400 shadow-rose-600/30 ring-2 ring-rose-500/40'
+                    : 'bg-rose-950/60 hover:bg-rose-900/80 text-rose-300 hover:text-white border border-rose-500/40'
+                }`}
+                title="Municipal Spam Section: View all AI filtered spam and report as not spam"
+              >
+                <ShieldAlert className="w-4 h-4 text-rose-400" />
+                <span>
+                  {activeTabSafe === 'spam' ? 'Exit Spam View' : 'Municipal Spam Section'}
+                </span>
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-rose-900/80 text-rose-200 border border-rose-500/50">
+                  {spamIssues.length}
+                </span>
+              </button>
+            )}
+
+            {/* Quick Report Button */}
+            <button
+              onClick={onOpenReportModal}
+              className="px-4 py-2 bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 text-white rounded-xl text-xs font-bold shadow-lg shadow-indigo-600/30 flex items-center gap-1.5 transition-all hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
+            >
+              <span>+ Report An Incident</span>
+            </button>
+          </div>
         </div>
 
         {/* Tab Switcher & Search Bar */}
@@ -241,18 +501,18 @@ export const CommunityIncidentsList: React.FC<CommunityIncidentsListProps> = ({
             <button
               onClick={() => setTab('all')}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${
-                tab === 'all'
+                activeTabSafe === 'all'
                   ? 'bg-indigo-600 text-white shadow'
                   : 'text-slate-400 hover:text-white'
               }`}
             >
-              All Reports ({issues.length})
+              All Reports ({nonSpamIssues.length})
             </button>
 
             <button
               onClick={() => setTab('others')}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all flex items-center gap-1.5 ${
-                tab === 'others'
+                activeTabSafe === 'others'
                   ? 'bg-indigo-600 text-white shadow'
                   : 'text-slate-400 hover:text-white'
               }`}
@@ -265,7 +525,7 @@ export const CommunityIncidentsList: React.FC<CommunityIncidentsListProps> = ({
               <button
                 onClick={() => setTab('mine')}
                 className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all flex items-center gap-1.5 ${
-                  tab === 'mine'
+                  activeTabSafe === 'mine'
                     ? 'bg-indigo-600 text-white shadow'
                     : 'text-slate-400 hover:text-white'
                 }`}
@@ -280,7 +540,7 @@ export const CommunityIncidentsList: React.FC<CommunityIncidentsListProps> = ({
                 <button
                   onClick={() => setTab('appointed_to_me')}
                   className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all flex items-center gap-1.5 ${
-                    tab === 'appointed_to_me'
+                    activeTabSafe === 'appointed_to_me'
                       ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow font-bold'
                       : 'text-emerald-400 hover:text-emerald-300'
                   }`}
@@ -292,7 +552,7 @@ export const CommunityIncidentsList: React.FC<CommunityIncidentsListProps> = ({
                 <button
                   onClick={() => setTab('my_bids')}
                   className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all flex items-center gap-1.5 ${
-                    tab === 'my_bids'
+                    activeTabSafe === 'my_bids'
                       ? 'bg-gradient-to-r from-blue-600 to-cyan-600 text-white shadow font-bold'
                       : 'text-cyan-400 hover:text-cyan-300'
                   }`}
@@ -306,7 +566,7 @@ export const CommunityIncidentsList: React.FC<CommunityIncidentsListProps> = ({
             <button
               onClick={() => setTab('top_upvoted')}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all flex items-center gap-1.5 ${
-                tab === 'top_upvoted'
+                activeTabSafe === 'top_upvoted'
                   ? 'bg-indigo-600 text-white shadow'
                   : 'text-slate-400 hover:text-white'
               }`}
@@ -314,6 +574,25 @@ export const CommunityIncidentsList: React.FC<CommunityIncidentsListProps> = ({
               <Flame className="w-3.5 h-3.5 text-orange-400" />
               <span>Most Upvoted</span>
             </button>
+
+            {/* SEPARATE BUTTON UNDER COMMUNITY: Strictly Municipal Authority Exclusive */}
+            {isAdmin && (
+              <button
+                onClick={() => setTab('spam')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all flex items-center gap-1.5 ${
+                  activeTabSafe === 'spam'
+                    ? 'bg-rose-600 text-white shadow font-bold ring-1 ring-rose-400'
+                    : 'text-rose-400 hover:text-rose-200 hover:bg-rose-950/40'
+                }`}
+                title="Municipal Spam Section: View AI filtered spam incidents"
+              >
+                <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
+                <span>Spam Section ({spamIssues.length})</span>
+                {spamIssues.length > 0 && (
+                  <span className="w-2 h-2 rounded-full bg-rose-400 animate-pulse" />
+                )}
+              </button>
+            )}
           </div>
 
           {/* Search Box */}
@@ -323,7 +602,7 @@ export const CommunityIncidentsList: React.FC<CommunityIncidentsListProps> = ({
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search by title, address, reporter..."
+              placeholder={activeTabSafe === 'spam' ? 'Search spam by title, reason...' : 'Search by title, address, reporter...'}
               className="w-full pl-9 pr-3 py-1.5 bg-slate-950/60 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
             />
             {searchQuery && (
@@ -378,38 +657,101 @@ export const CommunityIncidentsList: React.FC<CommunityIncidentsListProps> = ({
         </div>
       </div>
 
+      {/* Municipal Spam Moderation Banner (Only shown when activeTab is spam) */}
+      {isAdmin && activeTabSafe === 'spam' && (
+        <div className="bg-rose-950/40 border-b border-rose-900/60 px-4 sm:px-6 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
+          <div className="flex items-start sm:items-center gap-2.5">
+            <div className="p-2 rounded-xl bg-rose-900/50 border border-rose-500/40 text-rose-300 shrink-0">
+              <Bot className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs sm:text-sm font-bold text-white">
+                  Automated AI Filtration Shield
+                </span>
+                <span className="px-2 py-0.2 rounded-full text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30">
+                  Municipal Restrict Mode
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-300 mt-0.5 max-w-2xl leading-relaxed">
+                Incident reports whose text did not make sense (keyboard mashing, non-words, or gibberish) were cleared out of the public community map. Click <strong className="text-emerald-300">"Report as Not Spam"</strong> to restore any legitimate report.
+              </p>
+            </div>
+          </div>
+
+          {/* Batch AI Scan Action Button */}
+          <button
+            type="button"
+            onClick={handleRunBatchAIScan}
+            disabled={isScanningSpam}
+            className="px-3.5 py-2 bg-gradient-to-r from-rose-700 to-rose-600 hover:from-rose-600 hover:to-rose-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold shadow-md shadow-rose-950 flex items-center gap-1.5 transition-all self-start sm:self-auto shrink-0 cursor-pointer"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isScanningSpam ? 'animate-spin' : ''}`} />
+            <span>{isScanningSpam ? 'Scanning Active Reports...' : 'Run AI Scan on All Incidents'}</span>
+          </button>
+        </div>
+      )}
+
       {/* Main Content: Card Grid */}
       <div className="flex-1 overflow-y-auto p-4 sm:p-6 custom-scrollbar">
         {filteredIssues.length === 0 ? (
           <div className="h-96 flex flex-col items-center justify-center text-center p-6 bg-slate-900/40 border border-slate-800/80 rounded-2xl max-w-lg mx-auto mt-8">
-            <Users className="w-12 h-12 text-slate-600 mb-3" />
-            <h3 className="text-sm font-bold text-white">No Incidents Found</h3>
-            <p className="text-xs text-slate-400 mt-1 mb-4">
-              {searchQuery || selectedCategory !== 'all' || selectedStatus !== 'all'
-                ? 'No community reports match your current filters. Try resetting search or changing category.'
-                : tab === 'mine'
-                ? 'You have not submitted any civic reports yet. Report a pothole, broken streetlight, or garbage dump to get started!'
-                : 'No community incidents logged in this view yet.'}
-            </p>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => {
-                  setSearchQuery('');
-                  setSelectedCategory('all');
-                  setSelectedStatus('all');
-                  setTab('all');
-                }}
-                className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300 rounded-xl"
-              >
-                Reset Filters
-              </button>
-              <button
-                onClick={onOpenReportModal}
-                className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-xs font-bold text-white rounded-xl shadow"
-              >
-                + Report New Issue
-              </button>
-            </div>
+            {activeTabSafe === 'spam' ? (
+              <>
+                <ShieldCheck className="w-12 h-12 text-emerald-400 mb-3" />
+                <h3 className="text-sm font-bold text-white">No Spam Reports Detected</h3>
+                <p className="text-xs text-slate-400 mt-1 mb-4">
+                  The automated AI filtration shield has verified all current incident reports. No nonsensical text or gibberish reports are currently pending in the spam section.
+                </p>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleRunBatchAIScan}
+                    disabled={isScanningSpam}
+                    className="px-3.5 py-1.5 bg-rose-900/60 hover:bg-rose-800 border border-rose-500/40 text-xs font-semibold text-rose-200 rounded-xl flex items-center gap-1.5"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isScanningSpam ? 'animate-spin' : ''}`} />
+                    <span>Run AI Spam Scan</span>
+                  </button>
+                  <button
+                    onClick={() => setTab('all')}
+                    className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-300 rounded-xl"
+                  >
+                    View All Active Reports
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <Users className="w-12 h-12 text-slate-600 mb-3" />
+                <h3 className="text-sm font-bold text-white">No Incidents Found</h3>
+                <p className="text-xs text-slate-400 mt-1 mb-4">
+                  {searchQuery || selectedCategory !== 'all' || selectedStatus !== 'all'
+                    ? 'No community reports match your current filters. Try resetting search or changing category.'
+                    : activeTabSafe === 'mine'
+                    ? 'You have not submitted any civic reports yet. Report a pothole, broken streetlight, or garbage dump to get started!'
+                    : 'No community incidents logged in this view yet.'}
+                </p>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      setSearchQuery('');
+                      setSelectedCategory('all');
+                      setSelectedStatus('all');
+                      setTab('all');
+                    }}
+                    className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300 rounded-xl"
+                  >
+                    Reset Filters
+                  </button>
+                  <button
+                    onClick={onOpenReportModal}
+                    className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-xs font-bold text-white rounded-xl shadow"
+                  >
+                    + Report New Issue
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
@@ -420,12 +762,18 @@ export const CommunityIncidentsList: React.FC<CommunityIncidentsListProps> = ({
               const isMyReport = currentUserId && issue.reportedBy === currentUserId;
               const hasVoted = votedMap[issue.id];
               const isVoting = votingMap[issue.id];
+              const isSpam = Boolean(issue.isSpam);
+              const isProcessing = processingSpamId === issue.id;
 
               return (
                 <div
                   key={issue.id}
                   onClick={() => onOpenIssueDetails(issue)}
-                  className="bg-slate-900/80 hover:bg-slate-900 border border-slate-800 hover:border-indigo-500/50 rounded-2xl p-4 sm:p-5 flex flex-col justify-between transition-all duration-200 hover:shadow-xl hover:shadow-indigo-500/5 cursor-pointer group"
+                  className={`rounded-2xl p-4 sm:p-5 flex flex-col justify-between transition-all duration-200 cursor-pointer group border ${
+                    isSpam
+                      ? 'bg-slate-900/90 hover:bg-slate-900 border-rose-500/40 hover:border-rose-400 shadow-lg shadow-rose-950/20'
+                      : 'bg-slate-900/80 hover:bg-slate-900 border-slate-800 hover:border-indigo-500/50 hover:shadow-xl hover:shadow-indigo-500/5'
+                  }`}
                 >
                   <div className="space-y-3">
                     {/* Reporter Identification Header */}
@@ -455,9 +803,7 @@ export const CommunityIncidentsList: React.FC<CommunityIncidentsListProps> = ({
                             )}
                             {issue.isGoogleVerified && (
                               <span title="Verified Google Account Reporter" className="inline-flex items-center">
-                                <CheckCircle2
-                                  className="w-3.5 h-3.5 text-indigo-400 shrink-0"
-                                />
+                                <CheckCircle2 className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
                               </span>
                             )}
                           </div>
@@ -467,8 +813,13 @@ export const CommunityIncidentsList: React.FC<CommunityIncidentsListProps> = ({
                         </div>
                       </div>
 
-                      {/* Status pill or Admin Status Manager */}
-                      {isAdmin ? (
+                      {/* Status / Spam Badge */}
+                      {isSpam ? (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40 shrink-0">
+                          <ShieldAlert className="w-3 h-3 text-rose-400" />
+                          <span>AI Spam Filtered</span>
+                        </span>
+                      ) : isAdmin ? (
                         <div
                           className="flex items-center gap-1.5"
                           onClick={(e) => e.stopPropagation()}
@@ -509,6 +860,29 @@ export const CommunityIncidentsList: React.FC<CommunityIncidentsListProps> = ({
                       )}
                     </div>
 
+                    {/* AI SPAM ANALYSIS CARD BANNER (Displayed prominently on spam reports) */}
+                    {isSpam && (
+                      <div
+                        className="p-2.5 rounded-xl bg-rose-950/40 border border-rose-500/40 space-y-1.5 text-xs text-rose-200"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div className="flex items-center justify-between gap-1 text-[11px] font-bold text-rose-300">
+                          <div className="flex items-center gap-1">
+                            <Bot className="w-3.5 h-3.5 text-rose-400" />
+                            <span>AI Filtration Reason</span>
+                          </div>
+                          {issue.spamConfidence && (
+                            <span className="px-1.5 py-0.2 rounded text-[10px] bg-rose-900/60 border border-rose-500/40 text-rose-300 font-semibold">
+                              {Math.round(issue.spamConfidence * 100)}% Confidence
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-rose-100 font-medium leading-relaxed bg-black/30 p-2 rounded-lg border border-rose-500/20">
+                          "{issue.spamReason || 'Text does not make sense (incoherent keyboard mashing / gibberish)'}"
+                        </p>
+                      </div>
+                    )}
+
                     {/* Category & Priority Badge row */}
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg bg-slate-800/90 text-slate-200 text-xs font-medium border border-slate-700/60">
@@ -526,10 +900,18 @@ export const CommunityIncidentsList: React.FC<CommunityIncidentsListProps> = ({
 
                     {/* Title & Description */}
                     <div>
-                      <h3 className="text-sm sm:text-base font-bold text-white group-hover:text-indigo-300 transition-colors line-clamp-1 leading-snug">
+                      <h3
+                        className={`text-sm sm:text-base font-bold transition-colors line-clamp-1 leading-snug ${
+                          isSpam ? 'text-rose-100 group-hover:text-rose-300 font-mono' : 'text-white group-hover:text-indigo-300'
+                        }`}
+                      >
                         {issue.title}
                       </h3>
-                      <p className="text-xs text-slate-400 mt-1 line-clamp-2 leading-relaxed">
+                      <p
+                        className={`text-xs mt-1 line-clamp-2 leading-relaxed ${
+                          isSpam ? 'text-rose-300/80 font-mono bg-rose-950/20 p-1.5 rounded-lg border border-rose-900/30' : 'text-slate-400'
+                        }`}
+                      >
                         {issue.description || 'No additional details provided by resident.'}
                       </p>
                     </div>
@@ -571,8 +953,8 @@ export const CommunityIncidentsList: React.FC<CommunityIncidentsListProps> = ({
                       </div>
                     )}
 
-                    {/* Company Renovation Option (Apply / Put in Company Name) */}
-                    {isCompany && (
+                    {/* Company Renovation Option (Strictly non-spam) */}
+                    {isCompany && !isSpam && (
                       <div className="pt-1.5" onClick={(e) => e.stopPropagation()}>
                         {(() => {
                           const isAppointedToMyCompany =
@@ -604,7 +986,12 @@ export const CommunityIncidentsList: React.FC<CommunityIncidentsListProps> = ({
                                 <div className="flex items-center gap-1.5 text-cyan-300 font-semibold">
                                   <Building2 className="w-3.5 h-3.5 text-cyan-400" />
                                   <span>
-                                    Proposal: {myCompProposal.status === 'accepted' ? 'Accepted ✓' : myCompProposal.status === 'rejected' ? 'Closed' : 'Under Review'}
+                                    Proposal:{' '}
+                                    {myCompProposal.status === 'accepted'
+                                      ? 'Accepted ✓'
+                                      : myCompProposal.status === 'rejected'
+                                      ? 'Closed'
+                                      : 'Under Review'}
                                   </span>
                                 </div>
                                 <button
@@ -631,73 +1018,116 @@ export const CommunityIncidentsList: React.FC<CommunityIncidentsListProps> = ({
                         })()}
                       </div>
                     )}
-
-                    {/* Municipal Authority quick badge */}
-                    {isAdmin && issue.proposals && issue.proposals.length > 0 && (
-                      <div
-                        className="flex items-center justify-between p-2 bg-amber-950/20 border border-amber-500/30 rounded-xl text-xs text-amber-300"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <div className="flex items-center gap-1.5 font-bold text-[11px]">
-                          <Briefcase className="w-3.5 h-3.5 text-amber-400" />
-                          <span>{issue.proposals.length} Contractor Proposal{issue.proposals.length === 1 ? '' : 's'}</span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => onOpenIssueDetails(issue)}
-                          className="px-2 py-0.5 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-[10px] font-bold cursor-pointer transition-colors"
-                        >
-                          Review & Choose Company
-                        </button>
-                      </div>
-                    )}
                   </div>
 
-                  {/* Card Footer: Upvote + View on Map Actions */}
+                  {/* Card Footer: Spam Actions OR Normal Upvote + Map Actions */}
                   <div className="pt-3 mt-3 border-t border-slate-800 flex items-center justify-between gap-2">
-                    {/* Upvote Button */}
-                    <button
-                      type="button"
-                      onClick={(e) => handleUpvote(issue.id, e)}
-                      disabled={hasVoted || isVoting}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all ${
-                        hasVoted
-                          ? 'bg-emerald-600/20 text-emerald-400 border border-emerald-500/30'
-                          : 'bg-slate-800 hover:bg-slate-700/80 text-slate-300 hover:text-white border border-slate-700/80'
-                      }`}
-                      title="Corroborate this issue with an upvote"
-                    >
-                      <ThumbsUp className={`w-3.5 h-3.5 ${hasVoted ? 'text-emerald-400' : ''}`} />
-                      <span>{issue.upvotes || 0}</span>
-                      <span className="text-[10px] hidden sm:inline">
-                        {hasVoted ? 'Corroborated' : 'Upvote'}
-                      </span>
-                    </button>
+                    {isSpam ? (
+                      /* MUNICIPAL SPAM MODERATION ACTIONS */
+                      isAdmin ? (
+                        <div
+                          className="w-full flex items-center justify-between gap-2"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {/* PRIMARY ACTION: REPORT AS NOT SPAM */}
+                          <button
+                            type="button"
+                            onClick={(e) => handleReportNotSpam(issue, e)}
+                            disabled={isProcessing}
+                            className="px-3 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-900/40 flex items-center gap-1.5 transition-all hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
+                            title="Report this incident as Not Spam to restore it to the community map"
+                          >
+                            <CheckCircle2 className="w-4 h-4 text-white" />
+                            <span>{isProcessing ? 'Restoring...' : 'Report as Not Spam'}</span>
+                          </button>
 
-                    {/* Action Buttons: View on Map & Details */}
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onSelectIssueOnMap(issue);
-                        }}
-                        className="px-2.5 py-1.5 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-300 hover:text-indigo-200 border border-indigo-500/30 text-xs font-semibold flex items-center gap-1 transition-all"
-                        title="Locate this report on the interactive map"
-                      >
-                        <MapPin className="w-3.5 h-3.5 text-indigo-400" />
-                        <span>Map View</span>
-                      </button>
+                          <div className="flex items-center gap-1.5">
+                            {/* Delete Permanently */}
+                            <button
+                              type="button"
+                              onClick={(e) => handleDeleteSpamReport(issue, e)}
+                              disabled={isProcessing}
+                              className="p-1.5 bg-slate-800 hover:bg-rose-900/60 text-slate-400 hover:text-rose-200 border border-slate-700/60 hover:border-rose-500/40 rounded-xl transition-colors cursor-pointer"
+                              title="Delete permanently"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
 
-                      <button
-                        type="button"
-                        onClick={() => onOpenIssueDetails(issue)}
-                        className="p-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors"
-                        title="View complete issue timeline and details"
-                      >
-                        <ArrowRight className="w-4 h-4" />
-                      </button>
-                    </div>
+                            {/* View Full Details */}
+                            <button
+                              type="button"
+                              onClick={() => onOpenIssueDetails(issue)}
+                              className="p-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors cursor-pointer"
+                              title="View complete details"
+                            >
+                              <ArrowRight className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+                      ) : null
+                    ) : (
+                      /* NORMAL CITIZEN ACTIONS */
+                      <>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={(e) => handleUpvote(issue.id, e)}
+                            disabled={hasVoted || isVoting}
+                            className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                              hasVoted
+                                ? 'bg-emerald-600/20 text-emerald-400 border border-emerald-500/30'
+                                : 'bg-slate-800 hover:bg-slate-700/80 text-slate-300 hover:text-white border border-slate-700/80'
+                            }`}
+                            title="Corroborate this issue with an upvote"
+                          >
+                            <ThumbsUp className={`w-3.5 h-3.5 ${hasVoted ? 'text-emerald-400' : ''}`} />
+                            <span>{issue.upvotes || 0}</span>
+                            <span className="text-[10px] hidden sm:inline">
+                              {hasVoted ? 'Corroborated' : 'Upvote'}
+                            </span>
+                          </button>
+
+                          {/* Municipal quick manual flag */}
+                          {isAdmin && (
+                            <button
+                              type="button"
+                              onClick={(e) => handleManualMarkSpam(issue, e)}
+                              disabled={isProcessing}
+                              className="px-2 py-1 bg-slate-800/80 hover:bg-rose-950/60 border border-slate-700 hover:border-rose-500/40 text-[10px] text-slate-400 hover:text-rose-300 rounded-lg flex items-center gap-1 transition-colors"
+                              title="Municipal: Flag this incident as spam/gibberish"
+                            >
+                              <ShieldAlert className="w-3 h-3 text-rose-400" />
+                              <span className="hidden sm:inline">Flag Spam</span>
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Action Buttons: View on Map & Details */}
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onSelectIssueOnMap(issue);
+                            }}
+                            className="px-2.5 py-1.5 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-300 hover:text-indigo-200 border border-indigo-500/30 text-xs font-semibold flex items-center gap-1 transition-all"
+                            title="Locate this report on the interactive map"
+                          >
+                            <MapPin className="w-3.5 h-3.5 text-indigo-400" />
+                            <span>Map View</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => onOpenIssueDetails(issue)}
+                            className="p-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors"
+                            title="View complete issue timeline and details"
+                          >
+                            <ArrowRight className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
               );

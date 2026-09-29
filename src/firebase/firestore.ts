@@ -13,6 +13,7 @@ import {
   increment,
   arrayUnion,
   setDoc,
+  deleteDoc,
 } from 'firebase/firestore';
 import { db, ensureAuth } from './config';
 import { CivicIssue, ActivityItem, IssueCategory, IssueStatus, RenovationProposal } from '../types/issue';
@@ -103,6 +104,12 @@ export function subscribeToIssues(
           appointedCompanyName: data.appointedCompanyName || undefined,
           appointedDeadline: data.appointedDeadline || undefined,
           renovationStatus: data.renovationStatus || undefined,
+          isSpam: Boolean(data.isSpam),
+          spamReason: data.spamReason || undefined,
+          spamConfidence: data.spamConfidence !== undefined ? Number(data.spamConfidence) : undefined,
+          spamFilteredAt: data.spamFilteredAt || undefined,
+          markedNotSpamBy: data.markedNotSpamBy || undefined,
+          markedNotSpamAt: data.markedNotSpamAt || undefined,
         };
       });
 
@@ -174,6 +181,12 @@ export async function fetchIssuesDirectly(): Promise<CivicIssue[]> {
       appointedCompanyName: data.appointedCompanyName || undefined,
       appointedDeadline: data.appointedDeadline || undefined,
       renovationStatus: data.renovationStatus || undefined,
+      isSpam: Boolean(data.isSpam),
+      spamReason: data.spamReason || undefined,
+      spamConfidence: data.spamConfidence !== undefined ? Number(data.spamConfidence) : undefined,
+      spamFilteredAt: data.spamFilteredAt || undefined,
+      markedNotSpamBy: data.markedNotSpamBy || undefined,
+      markedNotSpamAt: data.markedNotSpamAt || undefined,
     };
   });
 
@@ -242,6 +255,9 @@ export async function createIssue(data: {
   reporterPhotoUrl?: string;
   reporterEmail?: string;
   isGoogleVerified?: boolean;
+  isSpam?: boolean;
+  spamReason?: string;
+  spamConfidence?: number;
 }): Promise<string> {
   const userId = await ensureAuth();
   const now = new Date();
@@ -251,6 +267,18 @@ export async function createIssue(data: {
   // Generate document reference synchronously with Firestore unique ID
   const docRef = doc(collection(db, ISSUES_COLLECTION));
   const newIssueId = docRef.id;
+
+  const isFlaggedAsSpam = Boolean(data.isSpam);
+
+  const initialTimeline = [
+    {
+      status: 'reported' as IssueStatus,
+      timestamp: new Date().toISOString(),
+      note: isFlaggedAsSpam
+        ? `[AI Filter Shield] Flagged as spam / nonsensical text: "${data.spamReason || 'Incoherent text'}". Routed to Municipal Spam Moderation.`
+        : 'Issue reported and mapped by community member',
+    },
+  ];
 
   const rawDoc: Record<string, any> = {
     title: (data.title || '').trim(),
@@ -270,14 +298,15 @@ export async function createIssue(data: {
     ward: data.ward || 'General',
     municipality: data.municipality || 'Municipal Council',
     isGoogleVerified: Boolean(data.isGoogleVerified),
-    timeline: [
-      {
-        status: 'reported',
-        timestamp: new Date().toISOString(),
-        note: 'Issue reported and mapped by community member',
-      },
-    ],
+    timeline: initialTimeline,
+    isSpam: isFlaggedAsSpam,
   };
+
+  if (isFlaggedAsSpam) {
+    rawDoc.spamReason = data.spamReason || 'Flagged by AI automated spam filtration';
+    rawDoc.spamConfidence = data.spamConfidence || 0.9;
+    rawDoc.spamFilteredAt = new Date().toISOString();
+  }
 
   if (data.reporterPhotoUrl) {
     rawDoc.reporterPhotoUrl = data.reporterPhotoUrl;
@@ -538,6 +567,107 @@ export async function appointCompanyProposal(
     type: 'status_update',
     detail: `Municipal Authority appointed "${companyName}" with deadline: ${deadline}`,
   });
+}
+
+/**
+ * Restores an incident that was flagged as spam back to the public community directory.
+ * Strictly executable by municipal administrators.
+ */
+export async function markIssueAsNotSpam(
+  issueId: string,
+  municipalUser: string = 'Municipal Authority'
+): Promise<boolean> {
+  try {
+    const issueRef = doc(db, ISSUES_COLLECTION, issueId);
+    const issueSnap = await getDoc(issueRef);
+    if (!issueSnap.exists()) {
+      throw new Error('Incident not found');
+    }
+
+    const currentData = issueSnap.data();
+    const currentTimeline = Array.isArray(currentData.timeline) ? currentData.timeline : [];
+
+    const unflagEvent = {
+      status: currentData.status || 'reported',
+      timestamp: new Date().toISOString(),
+      note: `Municipal Authority Review: Report verified and cleared as NOT SPAM. Restored to public community feed.`,
+      updatedBy: municipalUser,
+    };
+
+    await updateDoc(issueRef, {
+      isSpam: false,
+      markedNotSpamBy: municipalUser,
+      markedNotSpamAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      timeline: [...currentTimeline, unflagEvent],
+    });
+
+    logActivity({
+      issueId,
+      issueTitle: currentData.title || 'Civic Issue',
+      type: 'status_update',
+      detail: `Report verified as legitimate civic grievance by municipal authority (unflagged from spam)`,
+    });
+
+    return true;
+  } catch (err) {
+    console.error('Failed to mark issue as not spam:', err);
+    throw err;
+  }
+}
+
+/**
+ * Manually flags an incident as spam/fraud
+ */
+export async function markIssueAsSpam(
+  issueId: string,
+  reason: string = 'Flagged as spam / nonsensical text by Municipal Authority',
+  municipalUser: string = 'Municipal Authority'
+): Promise<boolean> {
+  try {
+    const issueRef = doc(db, ISSUES_COLLECTION, issueId);
+    const issueSnap = await getDoc(issueRef);
+    if (!issueSnap.exists()) {
+      throw new Error('Incident not found');
+    }
+
+    const currentData = issueSnap.data();
+    const currentTimeline = Array.isArray(currentData.timeline) ? currentData.timeline : [];
+
+    const spamEvent = {
+      status: currentData.status || 'reported',
+      timestamp: new Date().toISOString(),
+      note: `Flagged as spam: ${reason}`,
+      updatedBy: municipalUser,
+    };
+
+    await updateDoc(issueRef, {
+      isSpam: true,
+      spamReason: reason,
+      spamFilteredAt: new Date().toISOString(),
+      updatedAt: serverTimestamp(),
+      timeline: [...currentTimeline, spamEvent],
+    });
+
+    return true;
+  } catch (err) {
+    console.error('Failed to mark issue as spam:', err);
+    throw err;
+  }
+}
+
+/**
+ * Permanently removes a confirmed spam incident document
+ */
+export async function deleteSpamIssue(issueId: string): Promise<boolean> {
+  try {
+    const issueRef = doc(db, ISSUES_COLLECTION, issueId);
+    await deleteDoc(issueRef);
+    return true;
+  } catch (err) {
+    console.error('Failed to delete spam issue:', err);
+    throw err;
+  }
 }
 
 /**

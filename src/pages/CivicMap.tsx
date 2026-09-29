@@ -33,12 +33,12 @@ import {
 } from 'lucide-react';
 
 export const CivicMap: React.FC = () => {
-  const { user, isCompany, companyName } = useAuth();
+  const { user, isAdmin, isCompany, companyName } = useAuth();
   const { issues, loading, error, isLive, refresh } = useIssues();
   const { location: userCoords, loading: geoLoading, error: geoError, requestLocation } = useUserLocation();
 
   const [viewMode, setViewMode] = useState<'map' | 'community'>('map');
-  const [communityTab, setCommunityTab] = useState<'all' | 'others' | 'mine'>('all');
+  const [communityTab, setCommunityTab] = useState<'all' | 'others' | 'mine' | 'spam'>('all');
 
   const [selectedIssue, setSelectedIssue] = useState<CivicIssue | null>(null);
   const [reportModalOpen, setReportModalOpen] = useState(false);
@@ -59,12 +59,16 @@ export const CivicMap: React.FC = () => {
   const myReportsCount = useMemo(() => {
     const localIds = getLocalReportIds();
     return issues.filter((i) => {
+      if (i.isSpam) return false;
       if (user && (i.reportedBy === user.uid || (user.email && i.reporterEmail === user.email))) {
         return true;
       }
       return localIds.includes(i.id);
     }).length;
   }, [issues, user]);
+
+  const cleanReportsCount = useMemo(() => issues.filter((i) => !i.isSpam).length, [issues]);
+  const spamCount = useMemo(() => issues.filter((i) => Boolean(i.isSpam)).length, [issues]);
 
   // Appointed incidents strictly for Company accounts
   const companyAppointedIssues = useMemo(() => {
@@ -104,6 +108,7 @@ export const CivicMap: React.FC = () => {
   // Filter Issues
   const filteredIssues = useMemo(() => {
     return issues.filter((issue) => {
+      if (issue.isSpam) return false;
       if (filters.category !== 'all' && issue.category !== filters.category) return false;
       if (filters.status !== 'all' && issue.status !== filters.status) return false;
       if (filters.priority !== 'all' && issue.priorityLevel !== filters.priority) return false;
@@ -243,7 +248,7 @@ export const CivicMap: React.FC = () => {
             <span className="hidden sm:inline">Community Incidents</span>
             <span className="sm:hidden">Reports</span>
             <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-indigo-500/20 text-indigo-300">
-              {issues.length}
+              {cleanReportsCount}
             </span>
           </button>
         </div>
